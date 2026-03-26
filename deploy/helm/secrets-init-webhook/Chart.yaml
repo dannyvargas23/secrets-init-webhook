@@ -1,0 +1,15 @@
+apiVersion: v2
+name: secrets-init-webhook
+description: Mutating admission webhook that injects AWS Secrets Manager values as env vars into any pod
+type: application
+version: 0.5.0
+appVersion: "0.5.0"
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - secrets
+  - webhook
+  - aws
+  - eks
+  - pod-identity
+maintainers:
+  - name: Sevaro Platform Team

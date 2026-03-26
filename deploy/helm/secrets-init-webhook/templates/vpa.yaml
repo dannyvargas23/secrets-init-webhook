@@ -1,0 +1,40 @@
+{{- if .Values.verticalPodAutoscaler.enabled }}
+# VerticalPodAutoscaler — prompt requires HPA and VPA where appropriate.
+# VPA tunes resource requests based on observed usage, preventing over-provisioning
+# and OOM kills. We use it alongside HPA on different metrics:
+#   HPA scales on CPU/memory utilisation (replica count)
+#   VPA tunes request/limit values per container
+#
+# updateMode: "Off"  → recommendations only, no live resizing (safe starting point)
+# updateMode: "Auto" → live resizing via pod eviction (enable after baselining)
+#
+# Why appropriate here: the webhook's resource usage is proportional to admission
+# request volume which can vary significantly between cluster sizes. VPA prevents
+# both OOM kills during traffic spikes and wasted resources during quiet periods.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ include "secrets-init-webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secrets-init-webhook.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secrets-init-webhook.fullname" . }}
+  updatePolicy:
+    updateMode: {{ .Values.verticalPodAutoscaler.updateMode | quote }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: webhook
+        controlledResources:
+          - cpu
+          - memory
+        minAllowed:
+          cpu: 20m
+          memory: 32Mi
+        maxAllowed:
+          cpu: 500m
+          memory: 256Mi
+{{- end }}

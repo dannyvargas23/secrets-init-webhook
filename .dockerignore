@@ -1,0 +1,11 @@
+# Ignore everything by default, then allowlist what the build needs.
+*
+
+# Go source and module files required by the Dockerfile.
+!go.mod
+!go.sum
+!cmd/
+!internal/
+
+# Exclude test files from the build context — not needed in the binary.
+*_test.go

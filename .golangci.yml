@@ -1,0 +1,53 @@
+run:
+  timeout: 5m
+  go: "1.22"
+
+linters:
+  enable:
+    # Prompt explicitly requires these three:
+    - gosec        # security issues (hardcoded creds, weak crypto, etc.)
+    - staticcheck  # static analysis — superset of go vet
+    - govet        # go vet checks
+
+    # Standard correctness linters:
+    - errcheck     # unhandled errors
+    - ineffassign  # unused assignments
+    - unused       # unused code
+
+    # Style and idiom linters:
+    - gofmt        # formatting
+    - goimports    # import grouping and formatting
+    - misspell     # spelling in comments/strings
+    - revive       # general Go style
+
+    # Safety linters:
+    - bodyclose    # unclosed HTTP response bodies
+    - contextcheck # context passed correctly to all functions
+    - noctx        # http.NewRequest without context
+    - exhaustive   # exhaustive enum switches
+
+linters-settings:
+  gosec:
+    excludes:
+      # G104: unhandled errors from defer — handled explicitly with nolint comments in main.go
+      - G104
+  revive:
+    rules:
+      - name: exported
+      - name: var-naming
+      - name: error-return
+      - name: error-naming
+      - name: context-as-argument  # context.Context must be first argument — matches prompt requirement
+  staticcheck:
+    checks: ["all"]
+
+issues:
+  exclude-rules:
+    # Test files do not need production security rules (e.g. weak random for test data).
+    - path: _test\.go
+      linters:
+        - gosec
+    # Config test uses t.Setenv which gosec flags as a potential security issue.
+    - path: internal/config/config_test\.go
+      linters:
+        - gosec

@@ -1,0 +1,72 @@
+replicaCount: 2
+
+image:
+  repository: ""  # set via --set image.repository=<ecr-account>.dkr.ecr.<region>.amazonaws.com/secrets-init-webhook
+  digest: ""      # set via --set image.digest=sha256:<digest>
+  pullPolicy: Always
+
+aws:
+  region: us-east-1
+  # No roleArn needed — Pod Identity association is managed in OpenTofu.
+  # The EKS Pod Identity Agent injects credentials into the pod transparently.
+
+webhook:
+  failurePolicy: Fail
+  port: 8443
+  logLevel: info
+  otlpEndpoint: ""  # set to otel-collector.<namespace>:4317 to enable tracing
+  metricsPort: 9090
+  mutationMode: init-container
+
+  excludedNamespaces:
+    - kube-system
+    - kube-node-lease
+    - cert-manager
+
+secretsInit:
+  image:
+    repository: ""  # required when webhook.mutationMode=init-container
+    digest: ""      # required when webhook.mutationMode=init-container
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+    ephemeral-storage: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+    ephemeral-storage: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+verticalPodAutoscaler:
+  enabled: false
+  updateMode: "Off"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+tls:
+  duration: 8760h
+  renewBefore: 720h
+
+securityContext:
+  pod:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  container:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL

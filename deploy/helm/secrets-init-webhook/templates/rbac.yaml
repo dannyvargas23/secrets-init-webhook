@@ -1,0 +1,38 @@
+# ServiceAccount for the webhook.
+# Pod Identity credentials are injected by the EKS Pod Identity Agent daemonset.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "secrets-init-webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secrets-init-webhook.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# ClusterRole to read imagePullSecrets for registry authentication (k8schain).
+# Required to discover ENTRYPOINT/CMD from private container images.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "secrets-init-webhook.fullname" . }}
+  labels:
+    {{- include "secrets-init-webhook.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "secrets-init-webhook.fullname" . }}
+  labels:
+    {{- include "secrets-init-webhook.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "secrets-init-webhook.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "secrets-init-webhook.fullname" . }}
+    namespace: {{ .Release.Namespace }}

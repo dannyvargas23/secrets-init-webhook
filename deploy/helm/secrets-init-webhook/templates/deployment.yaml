@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secrets-init-webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "secrets-init-webhook.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "secrets-init-webhook.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "secrets-init-webhook.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/tls: {{ include (print $.Template.BasePath "/certificate.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "secrets-init-webhook.fullname" . }}
+      priorityClassName: system-cluster-critical
+      # Pod Identity requires a projected SA token (audience: pods.eks.amazonaws.com)
+      # injected by the Pod Identity Agent webhook. automount must be true.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.securityContext.pod.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.pod.runAsGroup }}
+        seccompProfile:
+          type: {{ .Values.securityContext.pod.seccompProfile.type }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "secrets-init-webhook.selectorLabels" . | nindent 14 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "secrets-init-webhook.selectorLabels" . | nindent 20 }}
+      containers:
+        - name: webhook
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: {{ .Values.securityContext.pod.seccompProfile.type }}
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: https
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.webhook.metricsPort }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.webhook.port | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.webhook.logLevel | quote }}
+            - name: OTLP_ENDPOINT
+              value: {{ .Values.webhook.otlpEndpoint | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.webhook.metricsPort | quote }}
+            - name: MUTATION_MODE
+              value: {{ .Values.webhook.mutationMode | quote }}
+            {{- if eq .Values.webhook.mutationMode "init-container" }}
+            - name: SECRETS_INIT_IMAGE
+              value: "{{ .Values.secretsInit.image.repository }}@{{ .Values.secretsInit.image.digest }}"
+            {{- end }}
+            - name: TLS_CERT_PATH
+              value: /tls/tls.crt
+            - name: TLS_KEY_PATH
+              value: /tls/tls.key
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            failureThreshold: 12
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "secrets-init-webhook.fullname" . }}-tls

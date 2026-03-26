@@ -1,0 +1,18 @@
+# Namespace with PodSecurity admission enforcement at the restricted profile.
+# The prompt requires: "Enable and enforce PodSecurity admission at the namespace level."
+# restricted profile enforces: runAsNonRoot, readOnlyRootFilesystem, no privilege escalation,
+# dropped capabilities, and seccomp RuntimeDefault — matching our pod securityContext.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    # enforce: block any pod that violates the restricted policy
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # warn: emit warnings for violations (useful during rollout)
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    # audit: log violations without blocking (for audit trail)
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
