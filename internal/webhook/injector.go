@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	initVolumeName = "secrets-init"
+	initVolumeName = "secrets-init-vol"
 	initMountPath  = "/secretsinit"
 	initBinaryPath = "/secretsinit/secrets-init"
 	initCACertPath = "/secretsinit/secrets-init.ca-certificates.crt"
@@ -22,14 +22,15 @@ const (
 
 // InjectorConfig holds configuration for init-container injection.
 type InjectorConfig struct {
-	Image string
+	Image     string
+	AWSRegion string
 }
 
 // containerMutationOpts holds per-container mutation options parsed from pod annotations.
 type containerMutationOpts struct {
 	ignoreMissing    bool
 	mutateProbes     bool
-	regionOverride   string
+	effectiveRegion  string // annotation override > webhook config region
 	namespace        string
 	imagePullSecrets []corev1.LocalObjectReference
 }
@@ -58,11 +59,17 @@ func BuildInjectionPatch(ctx context.Context, pod *corev1.Pod, cfg InjectorConfi
 		return nil, nil
 	}
 
+	// Determine effective region: annotation override > webhook config.
+	effectiveRegion := cfg.AWSRegion
+	if annoRegion := pod.Annotations["secretsinit.io/aws-region"]; annoRegion != "" {
+		effectiveRegion = annoRegion
+	}
+
 	// Check if ignore-missing-secrets is set.
 	mutOpts := containerMutationOpts{
 		ignoreMissing:    pod.Annotations["secretsinit.io/ignore-missing-secrets"] == "true",
 		mutateProbes:     pod.Annotations["secretsinit.io/mutate-probes"] == "true",
-		regionOverride:   pod.Annotations["secretsinit.io/aws-region"],
+		effectiveRegion:  effectiveRegion,
 		namespace:        pod.Namespace,
 		imagePullSecrets: pod.Spec.ImagePullSecrets,
 	}
@@ -236,16 +243,18 @@ func buildSingleContainerOps(ctx context.Context, container corev1.Container, ci
 		ops = append(ops, jsonPatchOp{
 			Op:    "add",
 			Path:  envPath,
-			Value: map[string]any{"name": "SEVARO_IGNORE_MISSING_SECRETS", "value": "true"},
+			Value: map[string]any{"name": "SECRETSINIT_IGNORE_MISSING", "value": "true"},
 		})
 	}
 
-	// Inject AWS_REGION override if annotation is set.
-	if opts.regionOverride != "" {
+	// Always inject SECRETSINIT_AWS_REGION so secrets-init uses the webhook's
+	// region config, not the container's own AWS_REGION (which may be for the
+	// application's use or could itself be an awssm: placeholder).
+	if opts.effectiveRegion != "" {
 		ops = append(ops, jsonPatchOp{
-			Op:   "add",
+			Op:    "add",
 			Path:  envPath,
-			Value: map[string]any{"name": "AWS_REGION", "value": opts.regionOverride},
+			Value: map[string]any{"name": "SECRETSINIT_AWS_REGION", "value": opts.effectiveRegion},
 		})
 	}
 

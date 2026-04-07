@@ -24,6 +24,14 @@ spec:
     spec:
       serviceAccountName: {{ include "secrets-init-webhook.fullname" . }}
       priorityClassName: system-cluster-critical
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Pod Identity requires a projected SA token (audience: pods.eks.amazonaws.com)
       # injected by the Pod Identity Agent webhook. automount must be true.
       automountServiceAccountToken: true
@@ -79,12 +87,8 @@ spec:
               value: {{ .Values.webhook.otlpEndpoint | quote }}
             - name: METRICS_PORT
               value: {{ .Values.webhook.metricsPort | quote }}
-            - name: MUTATION_MODE
-              value: {{ .Values.webhook.mutationMode | quote }}
-            {{- if eq .Values.webhook.mutationMode "init-container" }}
             - name: SECRETS_INIT_IMAGE
               value: "{{ .Values.secretsInit.image.repository }}@{{ .Values.secretsInit.image.digest }}"
-            {{- end }}
             - name: TLS_CERT_PATH
               value: /tls/tls.crt
             - name: TLS_KEY_PATH

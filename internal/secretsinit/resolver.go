@@ -1,5 +1,5 @@
-// Package secretsinit provides shared secret resolution logic used by both
-// the webhook server (direct mode) and the secrets-init binary (init-container mode).
+// Package secretsinit provides secret resolution logic used by the secrets-init
+// binary to resolve awssm: placeholders at container startup.
 package secretsinit
 
 import (

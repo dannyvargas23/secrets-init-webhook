@@ -3,7 +3,7 @@
 //
 // Modes:
 //
-//	secrets-init --copy-to /sevaro/secrets-init   → copy self to path and exit
+//	secrets-init --copy-to /secretsinit/secrets-init   → copy self to path and exit
 //	secrets-init <command> [args...]               → resolve env vars, exec command
 //
 // Secret values exist only in process memory — never in the pod spec or etcd.
@@ -43,6 +43,18 @@ func handleCopyMode() {
 	}
 }
 
+// internalEnvVars are env vars injected by the webhook for secrets-init's own use.
+// They are stripped before exec'ing the app — the app doesn't need them.
+var internalEnvVars = []string{
+	"SECRETSINIT_AWS_REGION",
+	"SECRETSINIT_IGNORE_MISSING",
+}
+
+// injectedSSLCertPath is the CA cert path injected by the webhook.
+// SSL_CERT_FILE is only stripped if it matches this value — the app may
+// have set its own SSL_CERT_FILE pointing at a custom CA bundle.
+const injectedSSLCertPath = "/secretsinit/secrets-init.ca-certificates.crt"
+
 // handleExecMode resolves awssm:// env vars, then replaces this process with the command.
 func handleExecMode() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -50,6 +62,7 @@ func handleExecMode() {
 
 	envMap := collectEnv()
 	envMap = resolveSecrets(ctx, envMap)
+	stripInternalEnvVars(envMap)
 
 	env := make([]string, 0, len(envMap))
 	for k, v := range envMap {
@@ -61,6 +74,30 @@ func handleExecMode() {
 	}
 }
 
+// stripInternalEnvVars removes webhook-injected env vars from the map
+// so they are not leaked to the application process.
+func stripInternalEnvVars(envMap map[string]string) {
+	for _, key := range internalEnvVars {
+		delete(envMap, key)
+	}
+	// Only strip SSL_CERT_FILE if it's the one we injected.
+	if envMap["SSL_CERT_FILE"] == injectedSSLCertPath {
+		delete(envMap, "SSL_CERT_FILE")
+	}
+}
+
+// resolveRegion returns the AWS region to use for Secrets Manager.
+// Priority: SECRETSINIT_AWS_REGION (injected by webhook) > AWS_REGION > AWS_DEFAULT_REGION.
+func resolveRegion(envMap map[string]string) string {
+	if r := envMap["SECRETSINIT_AWS_REGION"]; r != "" {
+		return r
+	}
+	if r := envMap["AWS_REGION"]; r != "" {
+		return r
+	}
+	return envMap["AWS_DEFAULT_REGION"]
+}
+
 // collectEnv reads all current environment variables into a map.
 func collectEnv() map[string]string {
 	envMap := make(map[string]string)
@@ -69,6 +106,16 @@ func collectEnv() map[string]string {
 		envMap[k] = v
 	}
 	return envMap
+}
+
+// awsCredentialEnvVars are the env vars the AWS SDK checks for static credentials.
+// These must be unset from the process environment before creating the SM client
+// so that Pod Identity (or IRSA/instance role) is used instead of any app-specific
+// credentials the container may have.
+var awsCredentialEnvVars = []string{
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
 }
 
 // resolveSecrets resolves any awssm:// placeholders in the env map.
@@ -86,9 +133,13 @@ func resolveSecrets(ctx context.Context, envMap map[string]string) map[string]st
 		return envMap
 	}
 
-	region := envMap["AWS_REGION"]
-	if region == "" {
-		region = envMap["AWS_DEFAULT_REGION"]
+	region := resolveRegion(envMap)
+
+	// Unset static AWS credentials from the process environment so the SDK
+	// credential chain falls through to Pod Identity / IRSA / instance role.
+	// The original values are preserved in envMap and passed to the app via Exec.
+	for _, key := range awsCredentialEnvVars {
+		os.Unsetenv(key)
 	}
 
 	client, err := secretsinit.NewSMClient(ctx, region)
@@ -97,7 +148,7 @@ func resolveSecrets(ctx context.Context, envMap map[string]string) map[string]st
 	}
 
 	opts := secretsinit.ResolveOptions{
-		IgnoreMissing: envMap["SEVARO_IGNORE_MISSING_SECRETS"] == "true",
+		IgnoreMissing: envMap["SECRETSINIT_IGNORE_MISSING"] == "true",
 	}
 
 	resolved, err := secretsinit.ResolveAll(ctx, client, envMap, opts)

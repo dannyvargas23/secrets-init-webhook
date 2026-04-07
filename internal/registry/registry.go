@@ -4,10 +4,13 @@ package registry
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"strings"
 	"sync"
 
-	ecr "github.com/awslabs/amazon-ecr-credential-helper/ecr-login"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/google/go-containerregistry/pkg/authn"
 	kc "github.com/google/go-containerregistry/pkg/authn/kubernetes"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -24,21 +27,45 @@ type ImageConfig struct {
 	Cmd        []string
 }
 
+// ECRClient abstracts the ECR API for testing.
+type ECRClient interface {
+	GetAuthorizationToken(ctx context.Context, params *ecr.GetAuthorizationTokenInput, optFns ...func(*ecr.Options)) (*ecr.GetAuthorizationTokenOutput, error)
+}
+
 // Client fetches image configs from container registries.
 type Client struct {
-	k8s   kubernetes.Interface
-	mu    sync.RWMutex
-	cache map[string]*ImageConfig
-	log   *zap.Logger
+	k8s       kubernetes.Interface
+	ecrClient ECRClient
+	mu        sync.RWMutex
+	cache     map[string]*ImageConfig
+	log       *zap.Logger
 }
 
 // NewClient creates a registry client.
 // If k8sClient is nil, falls back to the default keychain (no imagePullSecrets support).
-func NewClient(k8sClient kubernetes.Interface, log *zap.Logger) *Client {
+// Initialises the ECR client using the AWS SDK v2 default credential chain,
+// which supports EKS Pod Identity without requiring IMDS access.
+func NewClient(ctx context.Context, k8sClient kubernetes.Interface, log *zap.Logger) (*Client, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("registry: failed to load AWS config: %w", err)
+	}
+
 	return &Client{
-		k8s:   k8sClient,
-		cache: make(map[string]*ImageConfig),
-		log:   log,
+		k8s:       k8sClient,
+		ecrClient: ecr.NewFromConfig(awsCfg),
+		cache:     make(map[string]*ImageConfig),
+		log:       log,
+	}, nil
+}
+
+// NewClientWithECR creates a registry client with a custom ECR client (for testing).
+func NewClientWithECR(k8sClient kubernetes.Interface, ecrClient ECRClient, log *zap.Logger) *Client {
+	return &Client{
+		k8s:       k8sClient,
+		ecrClient: ecrClient,
+		cache:     make(map[string]*ImageConfig),
+		log:       log,
 	}
 }
 
@@ -93,30 +120,72 @@ func (c *Client) GetImageConfig(ctx context.Context, imageRef, namespace string,
 	return imgCfg, nil
 }
 
-// buildKeychain creates a keychain that uses k8schain (same as kubelet) with
-// fallback to the default keychain.
-func (c *Client) buildKeychain(ctx context.Context, namespace string, imagePullSecrets []corev1.LocalObjectReference) (authn.Keychain, error) {
-	ecrKeychain := authn.NewKeychainFromHelper(ecr.NewECRHelper())
+// sdkECRHelper implements the docker credentials Helper interface using AWS SDK v2.
+// Unlike amazon-ecr-credential-helper, this uses the SDK default credential chain
+// which supports EKS Pod Identity (169.254.170.23) without needing IMDS access.
+type sdkECRHelper struct {
+	client ECRClient
+}
 
-	if c.k8s == nil {
-		return authn.NewMultiKeychain(ecrKeychain, authn.DefaultKeychain), nil
+// Get returns ECR credentials for the given server URL.
+// Only returns credentials for ECR registries (*.ecr.*.amazonaws.com).
+// Returns empty for all other registries so the DefaultKeychain handles them.
+func (h *sdkECRHelper) Get(serverURL string) (string, string, error) {
+	if !strings.Contains(serverURL, ".ecr.") || !strings.Contains(serverURL, ".amazonaws.com") {
+		return "", "", fmt.Errorf("not an ECR registry: %s", serverURL)
 	}
 
-	var secretNames []string
-	for _, s := range imagePullSecrets {
-		secretNames = append(secretNames, s.Name)
-	}
-
-	k8sKeychain, err := kc.New(ctx, c.k8s, kc.Options{
-		Namespace:          namespace,
-		ImagePullSecrets:   secretNames,
-		ServiceAccountName: kc.NoServiceAccount,
-	})
+	ctx := context.Background()
+	out, err := h.client.GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
 	if err != nil {
-		return nil, err
+		return "", "", fmt.Errorf("ecr: failed to get authorization token: %w", err)
 	}
 
-	return authn.NewMultiKeychain(k8sKeychain, ecrKeychain, authn.DefaultKeychain), nil
+	for _, auth := range out.AuthorizationData {
+		if auth.AuthorizationToken == nil {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(*auth.AuthorizationToken)
+		if err != nil {
+			return "", "", fmt.Errorf("ecr: failed to decode authorization token: %w", err)
+		}
+		parts := strings.SplitN(string(decoded), ":", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1], nil
+		}
+	}
+
+	return "", "", fmt.Errorf("ecr: no authorization data returned")
+}
+
+// buildKeychain creates a keychain that uses k8schain (same as kubelet) with
+// fallback to SDK-based ECR auth and the default keychain.
+func (c *Client) buildKeychain(ctx context.Context, namespace string, imagePullSecrets []corev1.LocalObjectReference) (authn.Keychain, error) {
+	var keychains []authn.Keychain
+
+	if c.k8s != nil {
+		var secretNames []string
+		for _, s := range imagePullSecrets {
+			secretNames = append(secretNames, s.Name)
+		}
+
+		k8sKeychain, err := kc.New(ctx, c.k8s, kc.Options{
+			Namespace:          namespace,
+			ImagePullSecrets:   secretNames,
+			ServiceAccountName: kc.NoServiceAccount,
+		})
+		if err != nil {
+			return nil, err
+		}
+		keychains = append(keychains, k8sKeychain)
+	}
+
+	if c.ecrClient != nil {
+		keychains = append(keychains, authn.NewKeychainFromHelper(&sdkECRHelper{client: c.ecrClient}))
+	}
+
+	keychains = append(keychains, authn.DefaultKeychain)
+	return authn.NewMultiKeychain(keychains...), nil
 }
 
 func (c *Client) getFromCache(imageRef string) *ImageConfig {

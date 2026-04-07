@@ -32,17 +32,15 @@ const (
 
 func newTestServer() *Server {
 	cfg := &config.Config{
-		MutationMode:     "init-container",
 		SecretsInitImage: "test-image:latest",
 		AWSRegion:        "us-east-1",
 	}
 	reg := prometheus.NewRegistry()
 	return &Server{
-		cfg:         cfg,
-		log:         zap.NewNop(),
-		metrics:     observability.NewMetrics(reg),
-		secretCache: NewSecretCache(0, zap.NewNop()),
-		regClient:   registry.NewClient(nil, zap.NewNop()),
+		cfg:       cfg,
+		log:       zap.NewNop(),
+		metrics:   observability.NewMetrics(reg),
+		regClient: registry.NewClientWithECR(nil, nil, zap.NewNop()),
 	}
 }
 
@@ -81,7 +79,7 @@ func TestMutateInitContainerMode(t *testing.T) {
 		},
 	}
 
-	handler := s.handleMutateWith(nil) // smClient not needed for init-container mode
+	handler := s.handleMutate()
 	req := httptest.NewRequest(http.MethodPost, testMutatePath, bytes.NewReader(buildAdmissionReview(pod)))
 	req.Header.Set(testContentType, testJSONType)
 	rec := httptest.NewRecorder()
@@ -111,7 +109,7 @@ func TestMutateSkipAnnotation(t *testing.T) {
 		},
 	}
 
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 	req := httptest.NewRequest(http.MethodPost, testMutatePath, bytes.NewReader(buildAdmissionReview(pod)))
 	req.Header.Set(testContentType, testJSONType)
 	rec := httptest.NewRecorder()
@@ -135,7 +133,7 @@ func TestMutateNoAnnotation(t *testing.T) {
 		},
 	}
 
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 	req := httptest.NewRequest(http.MethodPost, testMutatePath, bytes.NewReader(buildAdmissionReview(pod)))
 	req.Header.Set(testContentType, testJSONType)
 	rec := httptest.NewRecorder()
@@ -152,7 +150,7 @@ func TestMutateRejectsNonPost(t *testing.T) {
 	t.Parallel()
 
 	s := newTestServer()
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 
 	req := httptest.NewRequest(http.MethodGet, testMutatePath, nil)
 	rec := httptest.NewRecorder()
@@ -165,7 +163,7 @@ func TestMutateRejectsWrongContentType(t *testing.T) {
 	t.Parallel()
 
 	s := newTestServer()
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 
 	req := httptest.NewRequest(http.MethodPost, testMutatePath, bytes.NewReader([]byte("{}")))
 	req.Header.Set(testContentType, "text/plain")
@@ -179,7 +177,7 @@ func TestMutateRejectsInvalidJSON(t *testing.T) {
 	t.Parallel()
 
 	s := newTestServer()
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 
 	req := httptest.NewRequest(http.MethodPost, testMutatePath, bytes.NewReader([]byte("not json")))
 	req.Header.Set(testContentType, testJSONType)
@@ -193,7 +191,7 @@ func TestMutateRejectsNilRequest(t *testing.T) {
 	t.Parallel()
 
 	s := newTestServer()
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 
 	review := admissionv1.AdmissionReview{Request: nil}
 	body, _ := json.Marshal(review)
@@ -225,7 +223,7 @@ func TestMutateContextTimeout(t *testing.T) {
 		},
 	}
 
-	handler := s.handleMutateWith(nil)
+	handler := s.handleMutate()
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 	time.Sleep(1 * time.Millisecond) // ensure context is expired

@@ -16,7 +16,7 @@ const testBusyboxImage = "busybox:latest"
 func TestGetImageConfigPublicImage(t *testing.T) {
 	t.Parallel()
 
-	client := registry.NewClient(nil, zap.NewNop())
+	client := registry.NewClientWithECR(nil, nil, zap.NewNop())
 
 	cfg, err := client.GetImageConfig(context.Background(), testBusyboxImage, "", nil)
 	require.NoError(t, err)
@@ -28,7 +28,7 @@ func TestGetImageConfigPublicImage(t *testing.T) {
 func TestGetImageConfigCachesResult(t *testing.T) {
 	t.Parallel()
 
-	client := registry.NewClient(nil, zap.NewNop())
+	client := registry.NewClientWithECR(nil, nil, zap.NewNop())
 	ctx := context.Background()
 
 	cfg1, err := client.GetImageConfig(ctx, testBusyboxImage, "", nil)
@@ -43,7 +43,7 @@ func TestGetImageConfigCachesResult(t *testing.T) {
 func TestGetImageConfigInvalidImage(t *testing.T) {
 	t.Parallel()
 
-	client := registry.NewClient(nil, zap.NewNop())
+	client := registry.NewClientWithECR(nil, nil, zap.NewNop())
 
 	_, err := client.GetImageConfig(context.Background(), "nonexistent.example.com/no-such-image:latest", "", nil)
 	require.Error(t, err)
@@ -53,7 +53,7 @@ func TestGetImageConfigInvalidImage(t *testing.T) {
 func TestGetImageConfigDistrolessNode(t *testing.T) {
 	t.Parallel()
 
-	client := registry.NewClient(nil, zap.NewNop())
+	client := registry.NewClientWithECR(nil, nil, zap.NewNop())
 
 	cfg, err := client.GetImageConfig(context.Background(), "gcr.io/distroless/nodejs18-debian12:latest", "", nil)
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestGetImageConfigDistrolessNode(t *testing.T) {
 func TestGetImageConfigMultiArch(t *testing.T) {
 	t.Parallel()
 
-	client := registry.NewClient(nil, zap.NewNop())
+	client := registry.NewClientWithECR(nil, nil, zap.NewNop())
 
 	cfg, err := client.GetImageConfig(context.Background(), "nginx:latest", "", nil)
 	require.NoError(t, err)

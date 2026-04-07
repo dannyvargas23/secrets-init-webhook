@@ -258,7 +258,7 @@ spec:
 
 - EKS cluster (Kubernetes >= 1.28) with Pod Identity Agent addon
 - cert-manager installed
-- Two ECR repositories: `secrets-init-webhook` and `secrets-init-secrets-init`
+- Two ECR repositories: `secrets-init-webhook` and `secrets-init`
 
 ### 1. Enable Pod Identity Agent
 
@@ -283,14 +283,37 @@ tofu init && tofu apply \
 ```bash
 # Build both images
 docker build --platform linux/amd64 --target webhook -t <ecr>/secrets-init-webhook:0.4.3 .
-docker build --platform linux/amd64 --target secrets-init -t <ecr>/secrets-init-secrets-init:0.4.3 .
+docker build --platform linux/amd64 --target secrets-init -t <ecr>/secrets-init:0.4.3 .
 
 # Push
 docker push <ecr>/secrets-init-webhook:0.4.3
-docker push <ecr>/secrets-init-secrets-init:0.4.3
+docker push <ecr>/secrets-init:0.4.3
 ```
 
-### 4. Deploy with Helm
+### 4. Package and publish the Helm chart
+
+The chart is published as an OCI artifact to ECR. The ECR repository must exist before the first push.
+
+```bash
+# Create the repository (one-time)
+aws ecr create-repository \
+  --repository-name charts/secrets-init-webhook \
+  --region us-east-1
+
+# Authenticate Helm to ECR
+aws ecr get-login-password --region us-east-1 | helm registry login \
+  --username AWS \
+  --password-stdin <ecr>
+
+# Package the chart
+helm package deploy/helm/secrets-init-webhook
+
+# Push — Helm appends the chart name automatically, so the URL ends at /charts
+helm push secrets-init-webhook-0.6.0.tgz \
+  oci://<ecr>/charts
+```
+
+### 5. Deploy with Helm
 
 Create a values file:
 
@@ -303,20 +326,34 @@ image:
 aws:
   region: us-east-1
 
-webhook:
-  mutationMode: init-container
-
 secretsInit:
   image:
-    repository: <ecr>/secrets-init-secrets-init
+    repository: <ecr>/secrets-init
     digest: "sha256:<secrets-init-digest>"
 ```
 
+Install from the ECR-published chart (recommended):
+
 ```bash
-helm upgrade --install secrets-init-webhook ./deploy/helm/secrets-init-webhook --namespace secrets-init-system --create-namespace -f values-prod.yaml
+helm upgrade --install secrets-init-webhook \
+  oci://<ecr>/charts/secrets-init-webhook \
+  --version 0.6.0 \
+  --namespace secrets-init-system --create-namespace \
+  -f values-prod.yaml \
+  --wait
 ```
 
-### 5. Set up Pod Identity for your apps
+Or install directly from the local chart (development / CI):
+
+```bash
+helm upgrade --install secrets-init-webhook \
+  deploy/helm/secrets-init-webhook \
+  --namespace secrets-init-system --create-namespace \
+  -f values-prod.yaml \
+  --wait
+```
+
+### 6. Set up Pod Identity for your apps
 
 For each namespace/ServiceAccount that needs secrets:
 
@@ -328,7 +365,7 @@ aws eks create-pod-identity-association \
   --role-arn <role-with-sm-access>
 ```
 
-### 6. Test
+### 7. Test
 
 ```bash
 kubectl run test-inject -n <namespace> --image=busybox --restart=Never \
@@ -354,9 +391,9 @@ kubectl delete pod test-inject -n <namespace>
 
 | Alert | PromQL | Severity |
 |---|---|---|
-| Webhook denying pods | `rate(secrets-init_secrets_webhook_admission_requests_total{result="denied"}[5m]) > 0` | critical |
-| p99 latency > 3s | `histogram_quantile(0.99, rate(secrets-init_secrets_webhook_admission_duration_seconds_bucket[5m])) > 3` | warning |
-| Secret fetch errors | `rate(secrets-init_secrets_webhook_secret_resolutions_total{result="error"}[5m]) > 0` | critical |
+| Webhook denying pods | `rate(secrets_init_webhook_admission_requests_total{result="denied"}[5m]) > 0` | critical |
+| p99 latency > 3s | `histogram_quantile(0.99, rate(secrets_init_webhook_admission_duration_seconds_bucket[5m])) > 3` | warning |
+| Secret fetch errors | `rate(secrets_init_webhook_secret_resolutions_total{result="error"}[5m]) > 0` | critical |
 | No webhook pods ready | `kube_deployment_status_replicas_available{deployment="secrets-init-webhook"} == 0` | critical |
 
 Also monitor `apiserver_admission_webhook_rejection_count` from the API server metrics.
@@ -392,8 +429,6 @@ Secrets are resolved at container startup. Already-running pods keep their origi
 kubectl rollout restart deployment/<app> -n <namespace>
 ```
 
-Use [Stakater Reloader](https://github.com/stakater/Reloader) to automate restarts after rotation.
-
 ---
 
 ## Development
@@ -410,7 +445,7 @@ govulncheck ./...
 Docker build (multi-target):
 ```bash
 docker build --platform linux/amd64 --target webhook -t secrets-init-webhook .
-docker build --platform linux/amd64 --target secrets-init -t secrets-init-secrets-init .
+docker build --platform linux/amd64 --target secrets-init -t secrets-init .
 ```
 
 ---

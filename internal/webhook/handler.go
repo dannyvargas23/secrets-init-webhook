@@ -17,12 +17,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// handleMutateWith returns an http.HandlerFunc for POST /mutate.
-//
-// The smClient is injected via closure — it is created once at server startup
-// and reused across all requests. A fresh Resolver (with a fresh cache) is
-// constructed per AdmissionReview request.
-func (s *Server) handleMutateWith(smClient SecretsManagerClient) http.HandlerFunc {
+const tracerName = "github.com/dannyvargas23/secrets-init-webhook"
+
+// handleMutate returns an http.HandlerFunc for POST /mutate.
+func (s *Server) handleMutate() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Input validation — reject malformed requests before doing any work.
 		if r.Method != http.MethodPost {
@@ -55,7 +53,7 @@ func (s *Server) handleMutateWith(smClient SecretsManagerClient) http.HandlerFun
 			return
 		}
 
-		review.Response = s.mutate(r.Context(), review.Request, smClient)
+		review.Response = s.mutate(r.Context(), review.Request)
 		review.Response.UID = review.Request.UID
 
 		w.Header().Set("Content-Type", "application/json")
@@ -72,7 +70,7 @@ func (s *Server) handleMutateWith(smClient SecretsManagerClient) http.HandlerFun
 // visibility into where admission latency comes from.
 //
 // Metrics: admission result and duration are recorded regardless of outcome.
-func (s *Server) mutate(ctx context.Context, req *admissionv1.AdmissionRequest, smClient SecretsManagerClient) *admissionv1.AdmissionResponse {
+func (s *Server) mutate(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "webhook.mutate")
 	defer span.End()
@@ -109,23 +107,7 @@ func (s *Server) mutate(ctx context.Context, req *admissionv1.AdmissionRequest, 
 
 	log.Info("handler: mutating pod")
 
-	// Determine mutation mode: per-pod annotation overrides server config.
-	mode := s.cfg.MutationMode
-	if override := pod.Annotations[modeAnnotation]; override != "" {
-		mode = override
-	}
-
-	var patch []byte
-	var err error
-
-	switch mode {
-	case "init-container":
-		patch, err = BuildInjectionPatch(ctx, &pod, InjectorConfig{Image: s.cfg.SecretsInitImage}, s.regClient, log)
-	default:
-		// "direct" mode: resolve secrets server-side (values end up in pod spec/etcd).
-		resolver := NewResolver(smClient, s.secretCache, s.metrics, log)
-		patch, err = BuildPatch(ctx, &pod, resolver, log)
-	}
+	patch, err := BuildInjectionPatch(ctx, &pod, InjectorConfig{Image: s.cfg.SecretsInitImage, AWSRegion: s.cfg.AWSRegion}, s.regClient, log)
 	if err != nil {
 		log.Error("handler: patch build failed", zap.Error(err))
 		span.RecordError(err)

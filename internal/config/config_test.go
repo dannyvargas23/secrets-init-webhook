@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	testRegion        = "us-east-1"
-	testInitContainer = "init-container"
+	testRegion = "us-east-1"
+	testImage  = "123456.dkr.ecr.us-east-1.amazonaws.com/secrets-init-vol@sha256:abc123"
 )
 
 func TestLoad(t *testing.T) {
@@ -23,17 +23,22 @@ func TestLoad(t *testing.T) {
 	}{
 		{
 			name:    "missing AWS_REGION returns error",
-			env:     map[string]string{},
+			env:     map[string]string{"SECRETS_INIT_IMAGE": testImage},
 			wantErr: "AWS_REGION is required",
 		},
 		{
+			name:    "missing SECRETS_INIT_IMAGE returns error",
+			env:     map[string]string{"AWS_REGION": testRegion},
+			wantErr: "SECRETS_INIT_IMAGE is required",
+		},
+		{
 			name:    "invalid LOG_LEVEL returns error",
-			env:     map[string]string{"AWS_REGION": testRegion, "LOG_LEVEL": "verbose"},
+			env:     map[string]string{"AWS_REGION": testRegion, "SECRETS_INIT_IMAGE": testImage, "LOG_LEVEL": "verbose"},
 			wantErr: "LOG_LEVEL",
 		},
 		{
 			name: "minimal valid config uses defaults",
-			env:  map[string]string{"AWS_REGION": testRegion},
+			env:  map[string]string{"AWS_REGION": testRegion, "SECRETS_INIT_IMAGE": testImage},
 			check: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
 				assert.Equal(t, 8443, cfg.Port)
@@ -42,16 +47,18 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, "info", cfg.LogLevel)
 				assert.Equal(t, 9090, cfg.MetricsPort)
 				assert.Empty(t, cfg.OTLPEndpoint)
+				assert.Equal(t, testImage, cfg.SecretsInitImage)
 			},
 		},
 		{
 			name: "all env vars set correctly",
 			env: map[string]string{
-				"AWS_REGION":    "eu-west-1",
-				"PORT":          "9443",
-				"LOG_LEVEL":     "debug",
-				"OTLP_ENDPOINT": "otel-collector:4317",
-				"METRICS_PORT":  "9091",
+				"AWS_REGION":         "eu-west-1",
+				"PORT":               "9443",
+				"LOG_LEVEL":          "debug",
+				"OTLP_ENDPOINT":      "otel-collector:4317",
+				"METRICS_PORT":       "9091",
+				"SECRETS_INIT_IMAGE": testImage,
 			},
 			check: func(t *testing.T, cfg *config.Config) {
 				t.Helper()
@@ -60,38 +67,6 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, "debug", cfg.LogLevel)
 				assert.Equal(t, "otel-collector:4317", cfg.OTLPEndpoint)
 				assert.Equal(t, 9091, cfg.MetricsPort)
-			},
-		},
-		{
-			name:    "invalid MUTATION_MODE returns error",
-			env:     map[string]string{"AWS_REGION": testRegion, "MUTATION_MODE": "invalid"},
-			wantErr: "MUTATION_MODE",
-		},
-		{
-			name:    "init-container mode without image returns error",
-			env:     map[string]string{"AWS_REGION": testRegion, "MUTATION_MODE": testInitContainer},
-			wantErr: "SECRETS_INIT_IMAGE is required",
-		},
-		{
-			name: "init-container mode with image succeeds",
-			env: map[string]string{
-				"AWS_REGION":         testRegion,
-				"MUTATION_MODE":      testInitContainer,
-				"SECRETS_INIT_IMAGE": "123456.dkr.ecr.us-east-1.amazonaws.com/secrets-init-secrets-init@sha256:abc123",
-			},
-			check: func(t *testing.T, cfg *config.Config) {
-				t.Helper()
-				assert.Equal(t, testInitContainer, cfg.MutationMode)
-				assert.Equal(t, "123456.dkr.ecr.us-east-1.amazonaws.com/secrets-init-secrets-init@sha256:abc123", cfg.SecretsInitImage)
-			},
-		},
-		{
-			name: "direct mode defaults",
-			env:  map[string]string{"AWS_REGION": testRegion},
-			check: func(t *testing.T, cfg *config.Config) {
-				t.Helper()
-				assert.Equal(t, "direct", cfg.MutationMode)
-				assert.Empty(t, cfg.SecretsInitImage)
 			},
 		},
 	}

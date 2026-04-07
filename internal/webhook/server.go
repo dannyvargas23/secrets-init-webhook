@@ -31,16 +31,12 @@ type Server struct {
 	cfg           *config.Config
 	log           *zap.Logger
 	metrics       *observability.Metrics
-	secretCache   *SecretCache
 	regClient     *registry.Client
 	webhookServer *http.Server
 	metricsServer *http.Server
 }
 
 // New constructs a Server with all routes wired and TLS loaded.
-//
-// It also initialises the shared AWS Secrets Manager client once here — avoiding
-// the cost of config loading and credential discovery on every admission request.
 func New(cfg *config.Config, log *zap.Logger, reg prometheus.Registerer) (*Server, error) {
 	// Load TLS certificate from cert-manager mounted files.
 	cert, err := tls.LoadX509KeyPair(cfg.TLSCertPath, cfg.TLSKeyPath)
@@ -49,16 +45,7 @@ func New(cfg *config.Config, log *zap.Logger, reg prometheus.Registerer) (*Serve
 			cfg.TLSCertPath, cfg.TLSKeyPath, err)
 	}
 
-	// Initialise the shared SM client once at startup — safe for concurrent use.
-	smClient, err := NewSMClient(context.Background(), cfg.AWSRegion)
-	if err != nil {
-		return nil, fmt.Errorf("server: failed to initialise Secrets Manager client: %w", err)
-	}
-
 	metrics := observability.NewMetrics(reg)
-
-	cacheTTL := time.Duration(cfg.SecretCacheTTL) * time.Second
-	secretCache := NewSecretCache(cacheTTL, log)
 
 	// Create in-cluster K8s client for imagePullSecrets lookup (k8schain).
 	var k8sClient kubernetes.Interface
@@ -71,15 +58,18 @@ func New(cfg *config.Config, log *zap.Logger, reg prometheus.Registerer) (*Serve
 		log.Info("server: not running in-cluster, registry auth will use default keychain only")
 	}
 
-	regClient := registry.NewClient(k8sClient, log)
+	regClient, err := registry.NewClient(context.Background(), k8sClient, log)
+	if err != nil {
+		return nil, fmt.Errorf("server: failed to initialise registry client: %w", err)
+	}
 
-	s := &Server{cfg: cfg, log: log, metrics: metrics, secretCache: secretCache, regClient: regClient}
+	s := &Server{cfg: cfg, log: log, metrics: metrics, regClient: regClient}
 
 	// ── webhook HTTPS mux ─────────────────────────────────────────────────────
 	// otelhttp.NewHandler wraps the entire mux so every request gets a trace span
 	// automatically — no per-handler instrumentation required.
 	webhookMux := http.NewServeMux()
-	webhookMux.HandleFunc("/mutate", s.handleMutateWith(smClient))
+	webhookMux.HandleFunc("/mutate", s.handleMutate())
 	webhookMux.HandleFunc("/healthz", s.handleHealthz)
 
 	s.webhookServer = &http.Server{
@@ -117,24 +107,8 @@ func New(cfg *config.Config, log *zap.Logger, reg prometheus.Registerer) (*Serve
 
 // Start runs both the webhook HTTPS server and the metrics HTTP server concurrently.
 //
-// Why not errgroup here: errgroup is used in main.go to compose Start with other
-// top-level lifecycle tasks (tracer shutdown, etc.). Start itself just manages the
-// two internal servers — a select on two error channels is the idiomatic Go pattern
-// for this bounded case without pulling errgroup into the server package.
-//
 // Graceful shutdown is initiated when ctx is cancelled (SIGTERM/SIGINT from main).
 func (s *Server) Start(ctx context.Context) error {
-	// ── start webhook server ──────────────────────────────────────────────────
-	// We use net.Listen + tls.NewListener + Serve rather than ListenAndServeTLS.
-	// ListenAndServeTLS always reads cert/key from file paths; it does not use
-	// TLSConfig.Certificates even when populated. Our cert is pre-loaded above,
-	// so we bypass the file-path code path entirely.
-	// Start background cache cleanup — sweep interval is 2x TTL to avoid
-	// constant CPU churn on the map. Expired entries are also lazily evicted
-	// on read, so staleness is bounded by TTL regardless of sweep frequency.
-	sweepInterval := 2 * time.Duration(s.cfg.SecretCacheTTL) * time.Second
-	s.secretCache.StartCleanup(ctx, sweepInterval)
-
 	webhookLn, err := net.Listen("tcp", s.webhookServer.Addr)
 	if err != nil {
 		return fmt.Errorf("server: failed to listen on %s: %w", s.webhookServer.Addr, err)

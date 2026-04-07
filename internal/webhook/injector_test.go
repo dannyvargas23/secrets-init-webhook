@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	testSecretsInitImage = "123456.dkr.ecr.us-east-1.amazonaws.com/secrets-init:latest"
+	testSecretsInitImage = "123456.dkr.ecr.us-east-1.amazonaws.com/secrets-init-vol:latest"
 	testSecretsInitPath  = "/secretsinit/secrets-init"
 	testPlaceholder      = "awssm:prod/config#KEY"
 	testInjectAnno       = "secretsinit.io/inject"
@@ -25,8 +25,12 @@ const (
 
 func runInjectionPatch(t *testing.T, pod *corev1.Pod) ([]map[string]any, error) {
 	t.Helper()
-	cfg := webhook.InjectorConfig{Image: testSecretsInitImage}
-	regClient := registry.NewClient(nil, zap.NewNop())
+	return runInjectionPatchWithCfg(t, pod, webhook.InjectorConfig{Image: testSecretsInitImage, AWSRegion: "us-east-1"})
+}
+
+func runInjectionPatchWithCfg(t *testing.T, pod *corev1.Pod, cfg webhook.InjectorConfig) ([]map[string]any, error) {
+	t.Helper()
+	regClient := registry.NewClientWithECR(nil, nil, zap.NewNop())
 	patch, err := webhook.BuildInjectionPatch(context.Background(), pod, cfg, regClient, zap.NewNop())
 	if err != nil {
 		return nil, err
@@ -156,7 +160,7 @@ func TestInjectionPatchAlreadyMutated(t *testing.T) {
 
 	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{{Name: "secrets-init"}},
+			Volumes: []corev1.Volume{{Name: "secrets-init-vol"}},
 			Containers: []corev1.Container{{
 				Name:    "app",
 				Command: []string{"/app"},
@@ -222,16 +226,16 @@ func TestInjectionPatchIgnoreMissingAnnotation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ops)
 
-	// Should inject SEVARO_IGNORE_MISSING_SECRETS env var.
+	// Should inject SECRETSINIT_IGNORE_MISSING env var.
 	found := false
 	for _, op := range ops {
 		if val, ok := op["value"].(map[string]any); ok {
-			if val["name"] == "SEVARO_IGNORE_MISSING_SECRETS" {
+			if val["name"] == "SECRETSINIT_IGNORE_MISSING" {
 				found = true
 			}
 		}
 	}
-	assert.True(t, found, "expected SEVARO_IGNORE_MISSING_SECRETS env var")
+	assert.True(t, found, "expected SECRETSINIT_IGNORE_MISSING env var")
 }
 
 func TestInjectionPatchProbesMutation(t *testing.T) {
@@ -389,4 +393,109 @@ func TestInjectionPatchNoEnvAtAll(t *testing.T) {
 	ops, err := runInjectionPatch(t, pod)
 	require.NoError(t, err)
 	assert.Nil(t, ops, "container with no env should not be wrapped")
+}
+
+func TestInjectionPatchAlwaysInjectsSECRETSINITAWSRegion(t *testing.T) {
+	t.Parallel()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "app",
+				Image:   "myapp:latest",
+				Command: []string{"/app"},
+				Env: []corev1.EnvVar{
+					{Name: "DB_PASSWORD", Value: testPlaceholder},
+					{Name: "AWS_REGION", Value: "eu-west-1"}, // app's own region — should not affect secrets-init
+				},
+			}},
+		},
+	}
+
+	ops, err := runInjectionPatch(t, pod)
+	require.NoError(t, err)
+	require.NotNil(t, ops)
+
+	// SECRETSINIT_AWS_REGION should always be injected with the webhook's configured region.
+	found := false
+	for _, op := range ops {
+		if val, ok := op["value"].(map[string]any); ok {
+			if val["name"] == "SECRETSINIT_AWS_REGION" {
+				assert.Equal(t, "us-east-1", val["value"], "should use webhook config region")
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "expected SECRETSINIT_AWS_REGION env var to be injected")
+}
+
+func TestInjectionPatchRegionAnnotationOverridesConfig(t *testing.T) {
+	t.Parallel()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"secretsinit.io/aws-region": "ap-southeast-1",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "app",
+				Command: []string{"/app"},
+				Env:     []corev1.EnvVar{{Name: "DB_PASSWORD", Value: testPlaceholder}},
+			}},
+		},
+	}
+
+	ops, err := runInjectionPatch(t, pod)
+	require.NoError(t, err)
+	require.NotNil(t, ops)
+
+	// Annotation should override the webhook config region.
+	for _, op := range ops {
+		if val, ok := op["value"].(map[string]any); ok {
+			if val["name"] == "SECRETSINIT_AWS_REGION" {
+				assert.Equal(t, "ap-southeast-1", val["value"], "annotation should override config region")
+				return
+			}
+		}
+	}
+	t.Fatal("expected SECRETSINIT_AWS_REGION env var to be injected")
+}
+
+func TestInjectionPatchContainerWithAWSCredsStillWrapped(t *testing.T) {
+	t.Parallel()
+
+	// Container has its own AWS credentials — webhook should still wrap it.
+	// The secrets-init binary handles credential isolation at runtime.
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "app",
+				Command: []string{"/app"},
+				Env: []corev1.EnvVar{
+					{Name: "DB_PASSWORD", Value: testPlaceholder},
+					{Name: "AWS_ACCESS_KEY_ID", Value: "AKIA..."},
+					{Name: "AWS_SECRET_ACCESS_KEY", Value: "wJalr..."},
+					{Name: "AWS_REGION", Value: "us-west-2"},
+				},
+			}},
+		},
+	}
+
+	ops, err := runInjectionPatch(t, pod)
+	require.NoError(t, err)
+	require.NotNil(t, ops, "pod with AWS creds should still be wrapped")
+
+	// SECRETSINIT_AWS_REGION should be present.
+	found := false
+	for _, op := range ops {
+		if val, ok := op["value"].(map[string]any); ok {
+			if val["name"] == "SECRETSINIT_AWS_REGION" {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "expected SECRETSINIT_AWS_REGION even when container has its own AWS creds")
 }

@@ -16,7 +16,6 @@ webhook:
   logLevel: info
   otlpEndpoint: ""  # set to otel-collector.<namespace>:4317 to enable tracing
   metricsPort: 9090
-  mutationMode: init-container
 
   excludedNamespaces:
     - kube-system
@@ -25,8 +24,8 @@ webhook:
 
 secretsInit:
   image:
-    repository: ""  # required when webhook.mutationMode=init-container
-    digest: ""      # required when webhook.mutationMode=init-container
+    repository: ""  # required — full ECR repo for secrets-init image
+    digest: ""      # required — content-addressable digest
 
 resources:
   requests:
@@ -52,6 +51,10 @@ verticalPodAutoscaler:
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+
+nodeSelector: {}
+
+tolerations: []
 
 tls:
   duration: 8760h
